@@ -31,6 +31,7 @@ namespace FORWARD
 		const float* shs,
 		bool* clamped,
 		const float* cov3D_precomp,
+		const float* cov3D_precomp_small,
 		const float* colors_precomp,
 		const float* viewmatrix,
 		const float* projmatrix,
@@ -42,12 +43,18 @@ namespace FORWARD
 		float2* means2D,
 		float* depths,
 		float* cov3Ds,
+		float* cov3D_smalls,
 		float* rgb,
 		float4* conic_opacity1,
 		float4* conic_opacity2,
+		uint4* conic_opacity3,
+		float4* conic_opacity4,
+		float3* conic_opacity5,
+		uint4* conic_opacity6,
 		const dim3 grid,
 		uint32_t* tiles_touched,
-		bool prefiltered); //float3* save_normal
+		bool prefiltered,
+		float3* save_normal);
 
 	// Main rasterization method.
 	void render(
@@ -59,10 +66,12 @@ namespace FORWARD
 		const float* colors,
 		const float4* conic_opacity1,
 		const float4* conic_opacity2,
+		const float4* conic_opacity4,
 		float* final_T,
 		uint32_t* n_contrib,
 		const float* bg_color,
-		float* out_color); //const float3* normal
+		float* out_color,
+		const float3* normal); 
 }
 
 

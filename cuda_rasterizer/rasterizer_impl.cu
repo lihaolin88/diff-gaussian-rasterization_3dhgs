@@ -74,6 +74,9 @@ __global__ void duplicateWithKeys(
 	const uint32_t* offsets,
 	uint64_t* gaussian_keys_unsorted,
 	uint32_t* gaussian_values_unsorted,
+	uint4* conic_opacity3,
+	float4* conic_opacity4,
+	uint4* conic_opacity6,
 	int* radii,
 	dim3 grid)
 {
@@ -88,7 +91,21 @@ __global__ void duplicateWithKeys(
 		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
 		uint2 rect_min, rect_max;
 
-		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+		//getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+        rect_min.x = conic_opacity3[idx].x;
+		rect_min.y = conic_opacity3[idx].y;
+		rect_max.x = conic_opacity3[idx].z;
+		rect_max.y = conic_opacity3[idx].w;
+
+// 		float x_min = conic_opacity4[idx].x;
+// 		float x_max = conic_opacity4[idx].z;
+// 		float y_min = conic_opacity4[idx].y;
+// 		float y_max = conic_opacity4[idx].w;
+// 		float x_min_ano = conic_opacity6[idx].x;
+// 		float x_max_ano = conic_opacity6[idx].z;
+// 		float y_min_ano = conic_opacity6[idx].y;
+// 		float y_max_ano = conic_opacity6[idx].w;
+
 
 		// For each tile that the bounding rect overlaps, emit a 
 		// key/value pair. The key is |  tile ID  |      depth      |,
@@ -99,12 +116,13 @@ __global__ void duplicateWithKeys(
 		{
 			for (int x = rect_min.x; x < rect_max.x; x++)
 			{
+			    //if((x > x_min && x <x_max && y >y_min&& y <y_max) || (x >x_min_ano && x <x_max_ano && y >y_min_ano && y <conic_opacity6.w)){
 				uint64_t key = y * grid.x + x;
 				key <<= 32;
 				key |= *((uint32_t*)&depths[idx]);
 				gaussian_keys_unsorted[off] = key;
 				gaussian_values_unsorted[off] = idx;
-				off++;
+				off++;//}
 			}
 		}
 	}
@@ -160,10 +178,15 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	obtain(chunk, geom.internal_radii, P, 128);
 	obtain(chunk, geom.means2D, P, 128);
 	obtain(chunk, geom.cov3D, P * 6, 128);
+	obtain(chunk, geom.cov3D_smalls, P * 6, 128);
 	obtain(chunk, geom.conic_opacity1, P, 128);
 	obtain(chunk, geom.conic_opacity2, P, 128);
+	obtain(chunk, geom.conic_opacity3, P, 128);
+	obtain(chunk, geom.conic_opacity4, P, 128);
+	obtain(chunk, geom.conic_opacity5, P, 128);
+	obtain(chunk, geom.conic_opacity6, P, 128);
 	obtain(chunk, geom.rgb, P * 3, 128);
-// 	obtain(chunk, geom.normal, P, 128);
+	obtain(chunk, geom.normal, P, 128);
 	obtain(chunk, geom.tiles_touched, P, 128);
 	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P);
 	obtain(chunk, geom.scanning_space, geom.scan_size, 128);
@@ -213,6 +236,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float scale_modifier,
 	const float* rotations,
 	const float* cov3D_precomp,
+	const float* cov3D_precomp_small,
 	const float* viewmatrix,
 	const float* projmatrix,
 	const float* cam_pos,
@@ -259,6 +283,7 @@ int CudaRasterizer::Rasterizer::forward(
 		shs,
 		geomState.clamped,
 		cov3D_precomp,
+		cov3D_precomp_small,
 		colors_precomp,
 		viewmatrix, projmatrix,
 		(glm::vec3*)cam_pos,
@@ -269,13 +294,19 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.means2D,
 		geomState.depths,
 		geomState.cov3D,
+		geomState.cov3D_smalls,
 		geomState.rgb,
 		geomState.conic_opacity1,
 		geomState.conic_opacity2,
+		geomState.conic_opacity3,
+		geomState.conic_opacity4,
+		geomState.conic_opacity5,
+		geomState.conic_opacity6,
 		tile_grid,
 		geomState.tiles_touched,
-		prefiltered
-	), debug) //geomState.normal
+		prefiltered,
+		geomState.normal
+	), debug)
 
 	// Compute prefix sum over full list of touched tile counts by Gaussians
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
@@ -298,10 +329,13 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.point_offsets,
 		binningState.point_list_keys_unsorted,
 		binningState.point_list_unsorted,
+		geomState.conic_opacity3,
+		geomState.conic_opacity4,
+		geomState.conic_opacity6,
 		radii,
 		tile_grid)
 	CHECK_CUDA(, debug)
-
+//     printf("here is\n");
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
 	// Sort complete list of (duplicated) Gaussian indices by keys
@@ -333,12 +367,12 @@ int CudaRasterizer::Rasterizer::forward(
 		feature_ptr,
 		geomState.conic_opacity1,
 		geomState.conic_opacity2,
+		geomState.conic_opacity4,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
-		out_color
-		), debug)//geomState.normal
-
+		out_color,
+		geomState.normal), debug)
 	return num_rendered;
 }
 
@@ -376,6 +410,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dsh,
 	float* dL_dscale,
 	float* dL_drot,
+	float* dL_conic_another,
 	bool debug)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
@@ -407,7 +442,9 @@ void CudaRasterizer::Rasterizer::backward(
 		geomState.means2D,
 		geomState.conic_opacity1,
 		geomState.conic_opacity2,
-
+		geomState.conic_opacity4,
+		geomState.conic_opacity5,
+		geomState.normal,
 		viewmatrix,
 		projmatrix,
 		color_ptr,
@@ -419,7 +456,8 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dopacity1,
 		dL_dopacity2,
 		(float3*)dL_dnormal,
-		dL_dcolor), debug) //geomState.normal,
+		dL_dcolor,
+		(float3*)dL_conic_another),debug)
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,
@@ -427,7 +465,7 @@ void CudaRasterizer::Rasterizer::backward(
 	const float* cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
 	CHECK_CUDA(BACKWARD::preprocess(P, D, M,
 		(float3*)means3D,
-
+		(float3*)normal,
 		radii,
 		shs,
 		geomState.clamped,
@@ -448,5 +486,6 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dcov3D,
 		dL_dsh,
 		(glm::vec3*)dL_dscale,
-		(glm::vec4*)dL_drot), debug) //(float3*)normal,
+		(glm::vec4*)dL_drot,
+		(float3*)dL_conic_another),debug)
 }

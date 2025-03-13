@@ -28,6 +28,7 @@ def rasterize_gaussians(
     scales,
     rotations,
     cov3Ds_precomp,
+    cov3D_precomp_small,
     raster_settings,
 ):
     return _RasterizeGaussians.apply(
@@ -40,6 +41,7 @@ def rasterize_gaussians(
         scales,
         rotations,
         cov3Ds_precomp,
+        cov3D_precomp_small,
         raster_settings,
     )
 
@@ -56,6 +58,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         scales,
         rotations,
         cov3Ds_precomp,
+        cov3D_precomp_small,
         raster_settings,
     ):
 
@@ -70,6 +73,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             rotations,
             raster_settings.scale_modifier,
             cov3Ds_precomp,
+            cov3D_precomp_small,
             raster_settings.viewmatrix,
             raster_settings.projmatrix,
             raster_settings.tanfovx,
@@ -156,6 +160,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations,
             grad_cov3Ds_precomp,
             None,
+            None,
         )
 
         return grads
@@ -190,7 +195,7 @@ class GaussianRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, means3D, means2D, normal, opacities, use_latent=None, Wz=None, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+    def forward(self, means3D, means2D, normal, opacities, use_latent=None, Wz=None, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None, cov3D_precomp_small = None):
         
         raster_settings = self.raster_settings
 
@@ -211,6 +216,8 @@ class GaussianRasterizer(nn.Module):
             rotations = torch.Tensor([])
         if cov3D_precomp is None:
             cov3D_precomp = torch.Tensor([])
+        if cov3D_precomp_small is None:
+            cov3D_precomp_small = torch.Tensor([])
 
         # Invoke C++/CUDA rasterization routine
         return rasterize_gaussians(
@@ -223,6 +230,7 @@ class GaussianRasterizer(nn.Module):
             scales, 
             rotations,
             cov3D_precomp,
+            cov3D_precomp_small,
             raster_settings, 
         )
 

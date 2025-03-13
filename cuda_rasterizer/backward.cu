@@ -15,25 +15,6 @@
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
-// __device__ float fast_erff_back(float x) {
-//     // constant value, can change
-//     const float p = 0.3275911f;
-//     const float a1 = 0.254829592f;
-//     const float a2 = -0.284496736f;
-//     const float a3 = 1.421413741f;
-//     const float a4 = -1.453152027f;
-//     const float a5 = 1.061405429f;
-//
-//     float sign = x < 0 ? -1.0f : 1.0f;
-//     x = fabsf(x);
-//
-//     // similar equation
-//     float t = 1.0f / (1.0f + p * x);
-//     float y = 1.0f - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * expf(-x * x);
-//
-//     return sign * y;
-// }
-
 // Backward pass for conversion of spherical harmonics to RGB for
 // each Gaussian.
 __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, const bool* clamped, const glm::vec3* dL_dcolor, glm::vec3* dL_dmeans, glm::vec3* dL_dshs)
@@ -170,9 +151,11 @@ __global__ void computeCov2DCUDA(int P,
 	const float* dL_dconics,
 	float3* dL_dmeans,
 	float3* dL_normal,
-	float* dL_dcov)
+	float* dL_dcov,
+	float3* dL_conic_another)
 {
 	auto idx = cg::this_grid().thread_rank();
+// 	printf("%d\n",radii[idx]);
 	if (idx >= P || !(radii[idx] > 0))
 		return;
 
@@ -197,7 +180,7 @@ __global__ void computeCov2DCUDA(int P,
 
 	glm::mat3 J = glm::mat3(h_x / t.z, 0.0f, -(h_x * t.x) / (t.z * t.z),
 		0.0f, h_y / t.z, -(h_y * t.y) / (t.z * t.z),
-		0, 0, 0);
+		0, 0, h_y / t.z);
 
 	glm::mat3 W = glm::mat3(
 		view_matrix[0], view_matrix[4], view_matrix[8],
@@ -219,7 +202,7 @@ __global__ void computeCov2DCUDA(int P,
 	float c = cov2D[1][1] += 0.3f;
 
 	float denom = a * c - b * b;
-	float dL_da = 0, dL_db = 0, dL_dc = 0;
+	float dL_da = 0, dL_db = 0, dL_dc = 0, dL_dd = 0, dL_de = 0, dL_df = 0;
 	float denom2inv = 1.0f / ((denom * denom) + 0.0000001f);
 
 
@@ -230,20 +213,31 @@ __global__ void computeCov2DCUDA(int P,
         dL_dc = denom2inv * (-a * a * dL_dconic.z + 2 * a * b * dL_dconic.y + (denom - a * c) * dL_dconic.x);
         dL_db = denom2inv * 2 * (b * c * dL_dconic.x - (denom + 2 * b * b) * dL_dconic.y + a * b * dL_dconic.z);
 
+        dL_dd = 2*dL_conic_another[idx].x;
+        dL_de = 2*dL_conic_another[idx].y;
+        dL_df = dL_conic_another[idx].z;
+
 		// Gradients of loss L w.r.t. each 3D covariance matrix (Vrk) entry, 
 		// given gradients w.r.t. 2D covariance matrix (diagonal).
 		// cov2D = transpose(T) * transpose(Vrk) * T;
-		dL_dcov[6 * idx + 0] = (T[0][0] * T[0][0] * dL_da + T[0][0] * T[1][0] * dL_db + T[1][0] * T[1][0] * dL_dc);
-		dL_dcov[6 * idx + 3] = (T[0][1] * T[0][1] * dL_da + T[0][1] * T[1][1] * dL_db + T[1][1] * T[1][1] * dL_dc);
-		dL_dcov[6 * idx + 5] = (T[0][2] * T[0][2] * dL_da + T[0][2] * T[1][2] * dL_db + T[1][2] * T[1][2] * dL_dc);
+// 		dL_dcov[6 * idx + 0] = (T[0][0] * T[0][0] * dL_da + T[0][0] * T[1][0] * dL_db + T[1][0] * T[1][0] * dL_dc);
+// 		dL_dcov[6 * idx + 3] = (T[0][1] * T[0][1] * dL_da + T[0][1] * T[1][1] * dL_db + T[1][1] * T[1][1] * dL_dc);
+// 		dL_dcov[6 * idx + 5] = (T[0][2] * T[0][2] * dL_da + T[0][2] * T[1][2] * dL_db + T[1][2] * T[1][2] * dL_dc);
+        dL_dcov[6 * idx + 0] = (T[0][0] * T[0][0] * dL_da + T[0][0] * T[1][0] * dL_db + T[1][0] * T[1][0] * dL_dc + T[0][0] * T[2][0] * dL_dd + T[1][0] * T[2][0] * dL_de + T[2][0] * T[2][0] * dL_df);
+		dL_dcov[6 * idx + 3] = (T[0][1] * T[0][1] * dL_da + T[0][1] * T[1][1] * dL_db + T[1][1] * T[1][1] * dL_dc + T[0][1] * T[2][1] * dL_dd + T[1][1] * T[2][1] * dL_de + T[2][1] * T[2][1] * dL_df);
+		dL_dcov[6 * idx + 5] = (T[0][2] * T[0][2] * dL_da + T[0][2] * T[1][2] * dL_db + T[1][2] * T[1][2] * dL_dc + T[0][2] * T[2][2] * dL_dd + T[1][2] * T[2][2] * dL_de + T[2][2] * T[2][2] * dL_df);
+
 
 		// Gradients of loss L w.r.t. each 3D covariance matrix (Vrk) entry, 
 		// given gradients w.r.t. 2D covariance matrix (off-diagonal).
 		// Off-diagonal elements appear twice --> double the gradient.
 		// cov2D = transpose(T) * transpose(Vrk) * T;
-		dL_dcov[6 * idx + 1] = 2 * T[0][0] * T[0][1] * dL_da + (T[0][0] * T[1][1] + T[0][1] * T[1][0]) * dL_db + 2 * T[1][0] * T[1][1] * dL_dc;
-		dL_dcov[6 * idx + 2] = 2 * T[0][0] * T[0][2] * dL_da + (T[0][0] * T[1][2] + T[0][2] * T[1][0]) * dL_db + 2 * T[1][0] * T[1][2] * dL_dc;
-		dL_dcov[6 * idx + 4] = 2 * T[0][2] * T[0][1] * dL_da + (T[0][1] * T[1][2] + T[0][2] * T[1][1]) * dL_db + 2 * T[1][1] * T[1][2] * dL_dc;
+// 		dL_dcov[6 * idx + 1] = 2 * T[0][0] * T[0][1] * dL_da + (T[0][0] * T[1][1] + T[0][1] * T[1][0]) * dL_db + 2 * T[1][0] * T[1][1] * dL_dc;
+// 		dL_dcov[6 * idx + 2] = 2 * T[0][0] * T[0][2] * dL_da + (T[0][0] * T[1][2] + T[0][2] * T[1][0]) * dL_db + 2 * T[1][0] * T[1][2] * dL_dc;
+// 		dL_dcov[6 * idx + 4] = 2 * T[0][2] * T[0][1] * dL_da + (T[0][1] * T[1][2] + T[0][2] * T[1][1]) * dL_db + 2 * T[1][1] * T[1][2] * dL_dc;
+	    dL_dcov[6 * idx + 1] = 2 * T[0][0] * T[0][1] * dL_da + (T[0][0] * T[1][1] + T[0][1] * T[1][0]) * dL_db + 2 * T[1][0] * T[1][1] * dL_dc + (T[0][0] * T[2][1] + T[0][1] * T[2][0]) * dL_dd + (T[1][0] * T[2][1] + T[1][1] * T[2][0]) * dL_de + 2 * T[2][0] * T[2][1] * dL_df;
+		dL_dcov[6 * idx + 2] = 2 * T[0][0] * T[0][2] * dL_da + (T[0][0] * T[1][2] + T[0][2] * T[1][0]) * dL_db + 2 * T[1][0] * T[1][2] * dL_dc + (T[0][0] * T[2][2] + T[0][2] * T[2][0]) * dL_dd + (T[1][0] * T[2][2] + T[1][2] * T[2][0]) * dL_de + 2 * T[2][0] * T[2][2] * dL_df;
+		dL_dcov[6 * idx + 4] = 2 * T[0][2] * T[0][1] * dL_da + (T[0][1] * T[1][2] + T[0][2] * T[1][1]) * dL_db + 2 * T[1][1] * T[1][2] * dL_dc + (T[0][1] * T[2][2] + T[0][2] * T[2][1]) * dL_dd + (T[1][1] * T[2][2] + T[1][2] * T[2][1]) * dL_de + 2 * T[2][1] * T[2][2] * dL_df;
 	}
 	else
 	{
@@ -253,18 +247,47 @@ __global__ void computeCov2DCUDA(int P,
 
 	// Gradients of loss w.r.t. upper 2x3 portion of intermediate matrix T
 	// cov2D = transpose(T) * transpose(Vrk) * T;
-	float dL_dT00 = 2 * (T[0][0] * Vrk[0][0] + T[0][1] * Vrk[0][1] + T[0][2] * Vrk[0][2]) * dL_da +
-		(T[1][0] * Vrk[0][0] + T[1][1] * Vrk[0][1] + T[1][2] * Vrk[0][2]) * dL_db;
+// 	float dL_dT00 = 2 * (T[0][0] * Vrk[0][0] + T[0][1] * Vrk[0][1] + T[0][2] * Vrk[0][2]) * dL_da +
+// 		(T[1][0] * Vrk[0][0] + T[1][1] * Vrk[0][1] + T[1][2] * Vrk[0][2]) * dL_db;
+// 	float dL_dT01 = 2 * (T[0][0] * Vrk[1][0] + T[0][1] * Vrk[1][1] + T[0][2] * Vrk[1][2]) * dL_da +
+// 		(T[1][0] * Vrk[1][0] + T[1][1] * Vrk[1][1] + T[1][2] * Vrk[1][2]) * dL_db;
+// 	float dL_dT02 = 2 * (T[0][0] * Vrk[2][0] + T[0][1] * Vrk[2][1] + T[0][2] * Vrk[2][2]) * dL_da +
+// 		(T[1][0] * Vrk[2][0] + T[1][1] * Vrk[2][1] + T[1][2] * Vrk[2][2]) * dL_db;
+// 	float dL_dT10 = 2 * (T[1][0] * Vrk[0][0] + T[1][1] * Vrk[0][1] + T[1][2] * Vrk[0][2]) * dL_dc +
+// 		(T[0][0] * Vrk[0][0] + T[0][1] * Vrk[0][1] + T[0][2] * Vrk[0][2]) * dL_db;
+// 	float dL_dT11 = 2 * (T[1][0] * Vrk[1][0] + T[1][1] * Vrk[1][1] + T[1][2] * Vrk[1][2]) * dL_dc +
+// 		(T[0][0] * Vrk[1][0] + T[0][1] * Vrk[1][1] + T[0][2] * Vrk[1][2]) * dL_db;
+// 	float dL_dT12 = 2 * (T[1][0] * Vrk[2][0] + T[1][1] * Vrk[2][1] + T[1][2] * Vrk[2][2]) * dL_dc +
+// 		(T[0][0] * Vrk[2][0] + T[0][1] * Vrk[2][1] + T[0][2] * Vrk[2][2]) * dL_db;
+    float dL_dT00 = 2 * (T[0][0] * Vrk[0][0] + T[0][1] * Vrk[0][1] + T[0][2] * Vrk[0][2]) * dL_da +
+		(T[1][0] * Vrk[0][0] + T[1][1] * Vrk[0][1] + T[1][2] * Vrk[0][2]) * dL_db +
+		(T[2][0] * Vrk[0][0] + T[2][1] * Vrk[0][1] + T[2][2] * Vrk[0][2]) * dL_dd;
 	float dL_dT01 = 2 * (T[0][0] * Vrk[1][0] + T[0][1] * Vrk[1][1] + T[0][2] * Vrk[1][2]) * dL_da +
-		(T[1][0] * Vrk[1][0] + T[1][1] * Vrk[1][1] + T[1][2] * Vrk[1][2]) * dL_db;
+		(T[1][0] * Vrk[1][0] + T[1][1] * Vrk[1][1] + T[1][2] * Vrk[1][2]) * dL_db +
+		(T[2][0] * Vrk[1][0] + T[2][1] * Vrk[1][1] + T[2][2] * Vrk[1][2]) * dL_dd;
 	float dL_dT02 = 2 * (T[0][0] * Vrk[2][0] + T[0][1] * Vrk[2][1] + T[0][2] * Vrk[2][2]) * dL_da +
-		(T[1][0] * Vrk[2][0] + T[1][1] * Vrk[2][1] + T[1][2] * Vrk[2][2]) * dL_db;
+		(T[1][0] * Vrk[2][0] + T[1][1] * Vrk[2][1] + T[1][2] * Vrk[2][2]) * dL_db +
+		(T[2][0] * Vrk[2][0] + T[2][1] * Vrk[2][1] + T[2][2] * Vrk[2][2]) * dL_dd;
+
 	float dL_dT10 = 2 * (T[1][0] * Vrk[0][0] + T[1][1] * Vrk[0][1] + T[1][2] * Vrk[0][2]) * dL_dc +
-		(T[0][0] * Vrk[0][0] + T[0][1] * Vrk[0][1] + T[0][2] * Vrk[0][2]) * dL_db;
+		(T[0][0] * Vrk[0][0] + T[0][1] * Vrk[0][1] + T[0][2] * Vrk[0][2]) * dL_db +
+		(T[2][0] * Vrk[0][0] + T[2][1] * Vrk[0][1] + T[2][2] * Vrk[0][2]) * dL_de;
 	float dL_dT11 = 2 * (T[1][0] * Vrk[1][0] + T[1][1] * Vrk[1][1] + T[1][2] * Vrk[1][2]) * dL_dc +
-		(T[0][0] * Vrk[1][0] + T[0][1] * Vrk[1][1] + T[0][2] * Vrk[1][2]) * dL_db;
+		(T[0][0] * Vrk[1][0] + T[0][1] * Vrk[1][1] + T[0][2] * Vrk[1][2]) * dL_db +
+		(T[2][0] * Vrk[1][0] + T[2][1] * Vrk[1][1] + T[2][2] * Vrk[1][2]) * dL_de;
 	float dL_dT12 = 2 * (T[1][0] * Vrk[2][0] + T[1][1] * Vrk[2][1] + T[1][2] * Vrk[2][2]) * dL_dc +
-		(T[0][0] * Vrk[2][0] + T[0][1] * Vrk[2][1] + T[0][2] * Vrk[2][2]) * dL_db;
+		(T[0][0] * Vrk[2][0] + T[0][1] * Vrk[2][1] + T[0][2] * Vrk[2][2]) * dL_db +
+		(T[2][0] * Vrk[2][0] + T[2][1] * Vrk[2][1] + T[2][2] * Vrk[2][2]) * dL_de;
+
+	float dL_dT20 = 2 * (T[2][0] * Vrk[0][0] + T[2][1] * Vrk[0][1] + T[2][2] * Vrk[0][2]) * dL_df +
+		(T[0][0] * Vrk[0][0] + T[0][1] * Vrk[0][1] + T[0][2] * Vrk[0][2]) * dL_dd +
+		(T[1][0] * Vrk[0][0] + T[1][1] * Vrk[0][1] + T[1][2] * Vrk[0][2]) * dL_de;
+	float dL_dT21 = 2 * (T[2][0] * Vrk[1][0] + T[2][1] * Vrk[1][1] + T[2][2] * Vrk[1][2]) * dL_df +
+		(T[0][0] * Vrk[1][0] + T[0][1] * Vrk[1][1] + T[0][2] * Vrk[1][2]) * dL_dd +
+		(T[1][0] * Vrk[1][0] + T[1][1] * Vrk[1][1] + T[1][2] * Vrk[1][2]) * dL_de;
+	float dL_dT22 = 2 * (T[2][0] * Vrk[2][0] + T[2][1] * Vrk[2][1] + T[2][2] * Vrk[2][2]) * dL_df +
+		(T[0][0] * Vrk[2][0] + T[0][1] * Vrk[2][1] + T[0][2] * Vrk[2][2]) * dL_dd +
+		(T[1][0] * Vrk[2][0] + T[1][1] * Vrk[2][1] + T[1][2] * Vrk[2][2]) * dL_de;
 
 	// Gradients of loss w.r.t. upper 3x2 non-zero entries of Jacobian matrix
 	// T = W * J
@@ -273,6 +296,8 @@ __global__ void computeCov2DCUDA(int P,
 	float dL_dJ11 = W[1][0] * dL_dT10 + W[1][1] * dL_dT11 + W[1][2] * dL_dT12;
 	float dL_dJ12 = W[2][0] * dL_dT10 + W[2][1] * dL_dT11 + W[2][2] * dL_dT12;
 
+	float dL_dJ22 = W[2][0] * dL_dT20 + W[2][1] * dL_dT21 + W[2][2] * dL_dT22;
+
 	float tz = 1.f / t.z;
 	float tz2 = tz * tz;
 	float tz3 = tz2 * tz;
@@ -280,7 +305,8 @@ __global__ void computeCov2DCUDA(int P,
 	// Gradients of loss w.r.t. transformed Gaussian mean t
 	float dL_dtx = x_grad_mul * -h_x * tz2 * dL_dJ02;
 	float dL_dty = y_grad_mul * -h_y * tz2 * dL_dJ12;
-	float dL_dtz = -h_x * tz2 * dL_dJ00 - h_y * tz2 * dL_dJ11 + (2 * h_x * t.x) * tz3 * dL_dJ02 + (2 * h_y * t.y) * tz3 * dL_dJ12;
+// 	float dL_dtz = -h_x * tz2 * dL_dJ00 - h_y * tz2 * dL_dJ11 + (2 * h_x * t.x) * tz3 * dL_dJ02 + (2 * h_y * t.y) * tz3 * dL_dJ12;
+    float dL_dtz = -h_x * tz2 * dL_dJ00 - h_y * tz2 * dL_dJ11 + (2 * h_x * t.x) * tz3 * dL_dJ02 + (2 * h_y * t.y) * tz3 * dL_dJ12 - h_y * tz2 * dL_dJ22;
 
 	// Account for transformation of mean to t
 	// t = transformPoint4x3(mean, view_matrix);
@@ -434,7 +460,9 @@ renderCUDA(
 	const float2* __restrict__ points_xy_image,
 	const float4* __restrict__ conic_opacity1,
 	const float4* __restrict__ conic_opacity2,
-
+	const float4* __restrict__ conic_opacity4,
+	const float3* __restrict__ conic_opacity5,
+	const float3* __restrict__ normal,
 	const float* viewmatrix,
 	const float* projmatrix,
 	const float* __restrict__ colors,
@@ -446,7 +474,8 @@ renderCUDA(
 	float* __restrict__ dL_dopacity1,
 	float* __restrict__ dL_dopacity2,
 	float3* __restrict__ dL_dnormal,
-	float* __restrict__ dL_dcolors) //const float3* __restrict__ normal,
+	float* __restrict__ dL_dcolors,
+	float3* __restrict__ dL_conic_another)
 {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -469,7 +498,9 @@ renderCUDA(
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity1[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity2[BLOCK_SIZE];
-	//__shared__ float3 collected_normal[3 * BLOCK_SIZE]; // is 3 correct？？？？
+	__shared__ float4 collected_conic_opacity4[BLOCK_SIZE];
+	__shared__ float3 collected_conic_opacity5[BLOCK_SIZE];
+	__shared__ float3 collected_normal[3 * BLOCK_SIZE]; // is 3 correct？？？？
 	__shared__ float collected_colors[C * BLOCK_SIZE];
 
 	// In the forward, we stored the final value for T, the
@@ -510,7 +541,9 @@ renderCUDA(
 			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
 			collected_conic_opacity1[block.thread_rank()] = conic_opacity1[coll_id];
 			collected_conic_opacity2[block.thread_rank()] = conic_opacity2[coll_id];
-			//collected_normal[block.thread_rank()] = normal[coll_id];
+			collected_conic_opacity4[block.thread_rank()] = conic_opacity4[coll_id];
+			collected_conic_opacity5[block.thread_rank()] = conic_opacity5[coll_id];
+			collected_normal[block.thread_rank()] = normal[coll_id];
 			for (int i = 0; i < C; i++)
 				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
 		}
@@ -531,7 +564,10 @@ renderCUDA(
 
 			const float4 con_o1 = collected_conic_opacity1[j];
 			const float4 con_o2 = collected_conic_opacity2[j];
-			//const float3 norm_use = collected_normal[j];
+			const float4 con_o4 = collected_conic_opacity4[j];
+			const float sigma6 = collected_conic_opacity5[j].x;
+		    const float sigma7 = collected_conic_opacity5[j].y;
+			const float3 norm_use = collected_normal[j];
 
 
 			const float power = -0.5f * (con_o1.x * d.x * d.x + con_o1.z * d.y * d.y) - con_o1.y * d.x * d.y; //(usex*usex + usey*usey); //
@@ -539,26 +575,18 @@ renderCUDA(
 				continue;
 
 
-            float denomi_z = 0.f;
-            //if(norm_use.z == 0.f){
-			//    denomi_z = 1.f/(sqrt(2.f)*0.0001f); //1.4142135f
-			//    }
-			//else{
-			//    denomi_z = 1.f/(sqrt(2.f)*norm_use.z);
-			//}
-            denomi_z = 1.f/(1.4142135f*max(con_o2.z, 0.0001f));
+            float denomi_z = norm_use.z;
 
-            const float temp = (con_o2.x*d.x + con_o2.y*d.y)*denomi_z;
-			const float tanh_result1 = fast_erff(temp);//erff(temp); //tanh((norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(1.4142135f*norm_use.z));//tanh((norm_use.x*d.x + norm_use.y*d.y)/(1.4142135f*norm_use.z));
-            //const float tanh_result2 = -tanh_result1;//tanh((norm_use.x*usex + norm_use.y*usey)/(-1.4142135f*norm_use.z)); //tanh(-(norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(1.4142135f*norm_use.z));//tanh(-(norm_use.x*d.x + norm_use.y*d.y)/(1.4142135f*norm_use.z));
-            const float dev_erf1 = 0.6366197723675814f * exp(-temp*temp);//2/sqrt(3.141592654f) * exp(-temp*temp);
-            //const float dev_erf2 = dev_erf1;
-            const float exp_part = exp(power);
 
-            float exp_and_dev = exp_part*dev_erf1;
+            const float temp = ((norm_use.x+con_o2.x)*d.x + (norm_use.y+con_o2.y)*d.y);//(norm_use.x*d.x + norm_use.y*d.y)*denomi_z;
+			const float tanh_result1 = erff(temp); //tanh((norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(1.4142135f*norm_use.z));//tanh((norm_use.x*d.x + norm_use.y*d.y)/(1.4142135f*norm_use.z));
+            const float tanh_result2 = -tanh_result1;//tanh((norm_use.x*usex + norm_use.y*usey)/(-1.4142135f*norm_use.z)); //tanh(-(norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(1.4142135f*norm_use.z));//tanh(-(norm_use.x*d.x + norm_use.y*d.y)/(1.4142135f*norm_use.z));
+            const float dev_erf1 = 2/sqrt(3.141592654f) * exp(-temp*temp);
+            const float dev_erf2 = dev_erf1;
+            const float exp_part = con_o4.x*exp(power);
 
             const float G1 = exp_part*(1+tanh_result1);//exp(power) * (1.f + tanh((norm_use.x*usex + norm_use.y*usey)/(1.4142135f*norm_use.z))); //exp(-0.5f*((con_o1.x * d.x + con_o1.y * d.y)*(con_o1.x * d.x + con_o1.y * d.y) + (con_o1.z * d.y)*(con_o1.z * d.y)))*(1.0f+tanh((norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(1.4142135f*norm_use.z)))/(2.0f*3.1415926f);
-            const float G2 = exp_part*(1-tanh_result1);//exp(power) * (1.f + tanh((norm_use.x*usex + norm_use.y*usey)/(-1.4142135f*norm_use.z))); //exp(-0.5f*((con_o1.x * d.x + con_o1.y * d.y)*(con_o1.x * d.x + con_o1.y * d.y) + (con_o1.z * d.y)*(con_o1.z * d.y)))*(1.0f+tanh(-(norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(1.4142135f*norm_use.z)))/(2.0f*3.1415926f);
+            const float G2 = exp_part*(1+tanh_result2);//exp(power) * (1.f + tanh((norm_use.x*usex + norm_use.y*usey)/(-1.4142135f*norm_use.z))); //exp(-0.5f*((con_o1.x * d.x + con_o1.y * d.y)*(con_o1.x * d.x + con_o1.y * d.y) + (con_o1.z * d.y)*(con_o1.z * d.y)))*(1.0f+tanh(-(norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(1.4142135f*norm_use.z)))/(2.0f*3.1415926f);
 
 
 			const float alpha1 = con_o1.w * G1;//exp(-0.5f*((con_o1.x * d.x + con_o1.y * d.y)*(con_o1.x * d.x + con_o1.y * d.y) + (con_o1.y * d.x + con_o1.z * d.y)*(con_o1.y * d.x + con_o1.z * d.y)))*(1.0f+tanh((norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.y * d.x + con_o1.z * d.y))/(1.4142135f*norm_use.z)))/(2*3.1415926f); //min(0.99f, con_o.w * exp(power));
@@ -566,33 +594,33 @@ renderCUDA(
 			const float alpha2 = con_o2.w * G2;//exp(-0.5f*((con_o1.x * d.x + con_o1.y * d.y)*(con_o1.x * d.x + con_o1.y * d.y) + (con_o1.y * d.x + con_o1.z * d.y)*(con_o1.y * d.x + con_o1.z * d.y)))*(1.0f+tanh(-(norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.y * d.x + con_o1.z * d.y))/(1.4142135f*norm_use.z)))/(2*3.1415926f); //min(0.99f, con_o.w * exp(power));
 			const float alpha = min(0.99f,0.5f*(alpha1 + alpha2));
 
-            float temp_Gx_part1 = -(con_o1.x*d.x + con_o1.y*d.y);
-            float temp_Gx_part2 = exp_and_dev*(con_o2.x)*denomi_z;
-            const float dG1_dx = (0.5f*W)*(temp_Gx_part1*G1 + temp_Gx_part2);//(0.5f*W)*(-(con_o1.x*d.x + con_o1.y*d.y)*G1 + exp_part*dev_erf1*(norm_use.x)*denomi_z); //(-(con_o1.x * d.x + con_o1.y * d.y)*G1 + exp_part*dev_erf1*(1.4142135f*norm_use.x/(W*norm_use.z))); //(2/W)*(-(con_o1.x*(con_o1.x * d.x + con_o1.y * d.y))*G1 *(2.0f*3.1415926f) + exp_part*((norm_use.x*con_o1.x)*(1.0f - tanh_result1*tanh_result1)/(1.4142135f*norm_use.z)))/(2.0f*3.1415926f);//exp_part*((2*d.x+2*d.x*tanh_result1+(1.0f-tanh_result1*tanh_result1)*norm_use.x/(1.4142135f*norm_use.z))/(2*3.1415926f));
-            const float dG2_dx = (0.5f*W)*(temp_Gx_part1*G2 - temp_Gx_part2);//(0.5f*W)*(-(con_o1.x*d.x + con_o1.y*d.y)*G2 - exp_part*dev_erf2*(norm_use.x)*denomi_z); //(-(con_o1.x * d.x + con_o1.y * d.y)*G2 - exp_part*dev_erf2*(1.4142135f*norm_use.x/(W*norm_use.z))); //(2/W)*(-(con_o1.x*(con_o1.x * d.x + con_o1.y * d.y))*G2 *(2.0f*3.1415926f) + exp_part*((norm_use.x*con_o1.x)*(1.0f - tanh_result2*tanh_result2)/(-1.4142135f*norm_use.z)))/(2.0f*3.1415926f);//exp_part*((2*d.x+2*d.x*tanh_result2+(1.0f-tanh_result2*tanh_result2)*norm_use.x/(1.4142135f*norm_use.z))/(2*3.1415926f));
-            float temp_Gy_part1 = -(con_o1.z*d.y + con_o1.y*d.x);
-            float temp_Gy_part2 = exp_and_dev*(con_o2.y)*denomi_z;
-            const float dG1_dy = (0.5f*H)*(temp_Gy_part1*G1 + temp_Gy_part2);//(0.5f*H)*(-(con_o1.z*d.y + con_o1.y*d.x)*G1 + exp_part*dev_erf1*(norm_use.y)*denomi_z); //(-(con_o1.z * d.y + con_o1.y * d.x)*G1 + exp_part*dev_erf1*(1.4142135f*norm_use.y/(H*norm_use.z))); //(2/H)*(-(con_o1.y*(con_o1.x * d.x + con_o1.y * d.y) + con_o1.z*(con_o1.z * d.y))*G1 *(2.0f*3.1415926f) + exp_part*((norm_use.x*con_o1.y + norm_use.y*con_o1.z)*(1.0f - tanh_result1*tanh_result1)/(1.4142135f*norm_use.z)))/(2.0f*3.1415926f);//exp_part*((2*d.y+2*d.y*tanh_result1+(1.0f-tanh_result1*tanh_result1)*norm_use.y/(1.4142135f*norm_use.z))/(2*3.1415926f));
-            const float dG2_dy = (0.5f*H)*(temp_Gy_part1*G2 - temp_Gy_part2);//(0.5f*H)*(-(con_o1.z*d.y + con_o1.y*d.x)*G2 - exp_part*dev_erf1*(norm_use.y)*denomi_z); //(-(con_o1.z * d.y + con_o1.y * d.x)*G2 - exp_part*dev_erf2*(1.4142135f*norm_use.y/(H*norm_use.z))); //(2/H)*(-(con_o1.y*(con_o1.x * d.x + con_o1.y * d.y) + con_o1.z*(con_o1.z * d.y))*G2 *(2.0f*3.1415926f) + exp_part*((norm_use.x*con_o1.y + norm_use.y*con_o1.z)*(1.0f - tanh_result2*tanh_result2)/(-1.4142135f*norm_use.z)))/(2.0f*3.1415926f);//exp_part*((2*d.y+2*d.y*tanh_result2+(1.0f-tanh_result2*tanh_result2)*norm_use.y/(1.4142135f*norm_use.z))/(2*3.1415926f));
+            const float dG1_dx = (0.5f*W)*(-(con_o1.x*d.x + con_o1.y*d.y)*G1 + exp_part*dev_erf1*(norm_use.x+con_o2.x));//(0.5f*W)*(-(con_o1.x*d.x + con_o1.y*d.y)*G1 + exp_part*dev_erf1*(norm_use.x)*denomi_z); //(-(con_o1.x * d.x + con_o1.y * d.y)*G1 + exp_part*dev_erf1*(1.4142135f*norm_use.x/(W*norm_use.z))); //(2/W)*(-(con_o1.x*(con_o1.x * d.x + con_o1.y * d.y))*G1 *(2.0f*3.1415926f) + exp_part*((norm_use.x*con_o1.x)*(1.0f - tanh_result1*tanh_result1)/(1.4142135f*norm_use.z)))/(2.0f*3.1415926f);//exp_part*((2*d.x+2*d.x*tanh_result1+(1.0f-tanh_result1*tanh_result1)*norm_use.x/(1.4142135f*norm_use.z))/(2*3.1415926f));
+            const float dG2_dx = (0.5f*W)*(-(con_o1.x*d.x + con_o1.y*d.y)*G2 - exp_part*dev_erf2*(norm_use.x+con_o2.x));//(0.5f*W)*(-(con_o1.x*d.x + con_o1.y*d.y)*G2 - exp_part*dev_erf2*(norm_use.x)*denomi_z); //(-(con_o1.x * d.x + con_o1.y * d.y)*G2 - exp_part*dev_erf2*(1.4142135f*norm_use.x/(W*norm_use.z))); //(2/W)*(-(con_o1.x*(con_o1.x * d.x + con_o1.y * d.y))*G2 *(2.0f*3.1415926f) + exp_part*((norm_use.x*con_o1.x)*(1.0f - tanh_result2*tanh_result2)/(-1.4142135f*norm_use.z)))/(2.0f*3.1415926f);//exp_part*((2*d.x+2*d.x*tanh_result2+(1.0f-tanh_result2*tanh_result2)*norm_use.x/(1.4142135f*norm_use.z))/(2*3.1415926f));
+            const float dG1_dy = (0.5f*H)*(-(con_o1.z*d.y + con_o1.y*d.x)*G1 + exp_part*dev_erf1*(norm_use.y+con_o2.y));//(0.5f*H)*(-(con_o1.z*d.y + con_o1.y*d.x)*G1 + exp_part*dev_erf1*(norm_use.y)*denomi_z); //(-(con_o1.z * d.y + con_o1.y * d.x)*G1 + exp_part*dev_erf1*(1.4142135f*norm_use.y/(H*norm_use.z))); //(2/H)*(-(con_o1.y*(con_o1.x * d.x + con_o1.y * d.y) + con_o1.z*(con_o1.z * d.y))*G1 *(2.0f*3.1415926f) + exp_part*((norm_use.x*con_o1.y + norm_use.y*con_o1.z)*(1.0f - tanh_result1*tanh_result1)/(1.4142135f*norm_use.z)))/(2.0f*3.1415926f);//exp_part*((2*d.y+2*d.y*tanh_result1+(1.0f-tanh_result1*tanh_result1)*norm_use.y/(1.4142135f*norm_use.z))/(2*3.1415926f));
+            const float dG2_dy = (0.5f*H)*(-(con_o1.z*d.y + con_o1.y*d.x)*G2 - exp_part*dev_erf1*(norm_use.y+con_o2.y));//(0.5f*H)*(-(con_o1.z*d.y + con_o1.y*d.x)*G2 - exp_part*dev_erf1*(norm_use.y)*denomi_z); //(-(con_o1.z * d.y + con_o1.y * d.x)*G2 - exp_part*dev_erf2*(1.4142135f*norm_use.y/(H*norm_use.z))); //(2/H)*(-(con_o1.y*(con_o1.x * d.x + con_o1.y * d.y) + con_o1.z*(con_o1.z * d.y))*G2 *(2.0f*3.1415926f) + exp_part*((norm_use.x*con_o1.y + norm_use.y*con_o1.z)*(1.0f - tanh_result2*tanh_result2)/(-1.4142135f*norm_use.z)))/(2.0f*3.1415926f);//exp_part*((2*d.y+2*d.y*tanh_result2+(1.0f-tanh_result2*tanh_result2)*norm_use.y/(1.4142135f*norm_use.z))/(2*3.1415926f));
 
-            float temp_G_cx = -(0.5f*d.x*d.x);
-            const float dG1_dcx = temp_G_cx*G1;//-(0.5f*d.x*d.x)*G1; //+ exp_part*dev_erf1*(norm_use.x*d.x)*denomi_z; //-0.5f*d.x*d.x*G1; //(-d.x*(con_o1.x * d.x + con_o1.y * d.y)*G1 *(2.0f*3.1415926f) + exp_part*(((norm_use.x * d.x)/(1.4142135f*norm_use.z)*(1.0f - tanh_result1*tanh_result1))))/(2.0f*3.1415926f);
-            const float dG2_dcx = temp_G_cx*G2;//-(0.5f*d.x*d.x)*G2; //- exp_part*dev_erf1*(norm_use.x*d.x)*denomi_z; //-0.5f*d.x*d.x*G2; //(-d.x*(con_o1.x * d.x + con_o1.y * d.y)*G2 *(2.0f*3.1415926f) + exp_part*(((norm_use.x * d.x)/(-1.4142135f*norm_use.z)*(1.0f - tanh_result2*tanh_result2))))/(2.0f*3.1415926f);
-            float temp_G_cy = -(0.5f*d.x*d.y);
-            const float dG1_dcy = temp_G_cy*G1;//-(0.5f*d.x*d.y)*G1; //+ exp_part*dev_erf1*(norm_use.x*d.y)*denomi_z; //-d.x*d.y*G1; //(-(d.y*(con_o1.x * d.x + con_o1.y * d.y))*G1 *(2.0f*3.1415926f) + exp_part*(((norm_use.x * d.y)/(1.4142135f*norm_use.z)*(1.0f - tanh_result1*tanh_result1))))/(2.0f*3.1415926f);
-            const float dG2_dcy = temp_G_cy*G2;//-(0.5f*d.x*d.y)*G2; //- exp_part*dev_erf1*(norm_use.x*d.y)*denomi_z; //-d.x*d.y*G2; //(-(d.y*(con_o1.x * d.x + con_o1.y * d.y))*G2 *(2.0f*3.1415926f) + exp_part*(((norm_use.x * d.y)/(-1.4142135f*norm_use.z)*(1.0f - tanh_result2*tanh_result2))))/(2.0f*3.1415926f);
-            float temp_G_cz = -(0.5f*d.y*d.y);
-            const float dG1_dcz = temp_G_cz*G1;//-(0.5f*d.y*d.y)*G1; //+ exp_part*dev_erf1*(norm_use.y*d.y)*denomi_z; //-0.5f*d.y*d.y*G1; //(-d.y*(con_o1.z * d.y)*G1 *(2.0f*3.1415926f) + exp_part*(((norm_use.y * d.y)/(1.4142135f*norm_use.z)*(1.0f - tanh_result1*tanh_result1))))/(2.0f*3.1415926f);
-            const float dG2_dcz = temp_G_cz*G2;//-(0.5f*d.y*d.y)*G2; //- exp_part*dev_erf1*(norm_use.y*d.y)*denomi_z; //-0.5f*d.y*d.y*G2; //(-d.y*(con_o1.z * d.y)*G2 *(2.0f*3.1415926f) + exp_part*(((norm_use.y * d.y)/(-1.4142135f*norm_use.z)*(1.0f - tanh_result2*tanh_result2))))/(2.0f*3.1415926f);
+            const float dG1_dcx = -(0.5f*d.x*d.x)*G1 + exp_part*dev_erf1*(0.5f*sigma6*sigma6*1.99999982358225f*con_o2.z*con_o2.z*temp + con_o2.z*sigma6*d.x);//-(0.5f*d.x*d.x)*G1; //+ exp_part*dev_erf1*(norm_use.x*d.x)*denomi_z; //-0.5f*d.x*d.x*G1; //(-d.x*(con_o1.x * d.x + con_o1.y * d.y)*G1 *(2.0f*3.1415926f) + exp_part*(((norm_use.x * d.x)/(1.4142135f*norm_use.z)*(1.0f - tanh_result1*tanh_result1))))/(2.0f*3.1415926f);
+            const float dG2_dcx = -(0.5f*d.x*d.x)*G2 - exp_part*dev_erf2*(0.5f*sigma6*sigma6*1.99999982358225f*con_o2.z*con_o2.z*temp + con_o2.z*sigma6*d.x);//-(0.5f*d.x*d.x)*G2; //- exp_part*dev_erf1*(norm_use.x*d.x)*denomi_z; //-0.5f*d.x*d.x*G2; //(-d.x*(con_o1.x * d.x + con_o1.y * d.y)*G2 *(2.0f*3.1415926f) + exp_part*(((norm_use.x * d.x)/(-1.4142135f*norm_use.z)*(1.0f - tanh_result2*tanh_result2))))/(2.0f*3.1415926f);
+            const float dG1_dcy = -(0.5f*d.x*d.y)*G1 + 0.5f*exp_part*dev_erf1*(sigma6*sigma7*1.99999982358225f*con_o2.z*con_o2.z*temp + con_o2.z*(sigma7*d.x+sigma6*d.y));//-(0.5f*d.x*d.y)*G1; //+ exp_part*dev_erf1*(norm_use.x*d.y)*denomi_z; //-d.x*d.y*G1; //(-(d.y*(con_o1.x * d.x + con_o1.y * d.y))*G1 *(2.0f*3.1415926f) + exp_part*(((norm_use.x * d.y)/(1.4142135f*norm_use.z)*(1.0f - tanh_result1*tanh_result1))))/(2.0f*3.1415926f);
+            const float dG2_dcy = -(0.5f*d.x*d.y)*G2 - 0.5f*exp_part*dev_erf2*(sigma6*sigma7*1.99999982358225f*con_o2.z*con_o2.z*temp + con_o2.z*(sigma7*d.x+sigma6*d.y));//-(0.5f*d.x*d.y)*G2; //- exp_part*dev_erf1*(norm_use.x*d.y)*denomi_z; //-d.x*d.y*G2; //(-(d.y*(con_o1.x * d.x + con_o1.y * d.y))*G2 *(2.0f*3.1415926f) + exp_part*(((norm_use.x * d.y)/(-1.4142135f*norm_use.z)*(1.0f - tanh_result2*tanh_result2))))/(2.0f*3.1415926f);
+            const float dG1_dcz = -(0.5f*d.y*d.y)*G1 + exp_part*dev_erf1*(0.5f*sigma7*sigma7*1.99999982358225f*con_o2.z*con_o2.z*temp + con_o2.z*sigma7*d.y);//-(0.5f*d.y*d.y)*G1; //+ exp_part*dev_erf1*(norm_use.y*d.y)*denomi_z; //-0.5f*d.y*d.y*G1; //(-d.y*(con_o1.z * d.y)*G1 *(2.0f*3.1415926f) + exp_part*(((norm_use.y * d.y)/(1.4142135f*norm_use.z)*(1.0f - tanh_result1*tanh_result1))))/(2.0f*3.1415926f);
+            const float dG2_dcz = -(0.5f*d.y*d.y)*G2 - exp_part*dev_erf2*(0.5f*sigma7*sigma7*1.99999982358225f*con_o2.z*con_o2.z*temp + con_o2.z*sigma7*d.y);//-(0.5f*d.y*d.y)*G2; //- exp_part*dev_erf1*(norm_use.y*d.y)*denomi_z; //-0.5f*d.y*d.y*G2; //(-d.y*(con_o1.z * d.y)*G2 *(2.0f*3.1415926f) + exp_part*(((norm_use.y * d.y)/(-1.4142135f*norm_use.z)*(1.0f - tanh_result2*tanh_result2))))/(2.0f*3.1415926f);
 
-            const float dG1_dn1 =  exp_and_dev*d.x*denomi_z;//exp_part*dev_erf1*d.x*denomi_z; //(con_o1.x*d.x + con_o1.y*d.y)*denomi_z;//(1.4142135f*d.x/(W*norm_use.z)); //(exp_part)*(1.0f - tanh_result1*tanh_result1)*((con_o1.x * d.x + con_o1.y * d.y)/(1.4142135f*norm_use.z))/(2.0f*3.1415926f);//exp_part*(1.0f-tanh_result1*tanh_result1)*d.x/(1.4142135f*norm_use.z) / (2*3.1415926f);
-            const float dG1_dn2 =  exp_and_dev*d.y*denomi_z;//exp_part*dev_erf1*d.y*denomi_z; //(con_o1.z*d.y)*denomi_z;//(1.4142135f*d.y/(H*norm_use.z)); //(exp_part)*(1.0f - tanh_result1*tanh_result1)*((con_o1.z * d.y)/(1.4142135f*norm_use.z))/(2.0f*3.1415926f);//exp_part*(1.0f-tanh_result1*tanh_result1)*d.y/(1.4142135f*norm_use.z) / (2*3.1415926f);
-            const float dG1_dn3 =  -exp_and_dev*temp/max(con_o2.z, 0.0001f);//-exp_part*dev_erf1*((norm_use.x*d.x + norm_use.y*d.y)/(sqrt(2.f)*norm_use.z*norm_use.z)); //((norm_use.x*usex + norm_use.y*usey)/(1.4142135f*norm_use.z*norm_use.z));//(-1.4142135f*(norm_use.x*d.x/W + norm_use.y*d.y/H)/(norm_use.z*norm_use.z)); //(exp_part)*(1.0f - tanh_result1*tanh_result1)*((norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(-1.4142135f*norm_use.z*norm_use.z))/(2.0f*3.1415926f);//exp_part*(1.0f-tanh_result1*tanh_result1)*(norm_use.x*d.x + norm_use.y*d.y)/(1.4142135f*norm_use.z) / (2*3.1415926f);
+            const float dG1_dn1 =  exp_part*dev_erf1*d.x*denomi_z;//exp_part*dev_erf1*d.x*denomi_z; //(con_o1.x*d.x + con_o1.y*d.y)*denomi_z;//(1.4142135f*d.x/(W*norm_use.z)); //(exp_part)*(1.0f - tanh_result1*tanh_result1)*((con_o1.x * d.x + con_o1.y * d.y)/(1.4142135f*norm_use.z))/(2.0f*3.1415926f);//exp_part*(1.0f-tanh_result1*tanh_result1)*d.x/(1.4142135f*norm_use.z) / (2*3.1415926f);
+            const float dG1_dn2 =  exp_part*dev_erf1*d.y*denomi_z;//exp_part*dev_erf1*d.y*denomi_z; //(con_o1.z*d.y)*denomi_z;//(1.4142135f*d.y/(H*norm_use.z)); //(exp_part)*(1.0f - tanh_result1*tanh_result1)*((con_o1.z * d.y)/(1.4142135f*norm_use.z))/(2.0f*3.1415926f);//exp_part*(1.0f-tanh_result1*tanh_result1)*d.y/(1.4142135f*norm_use.z) / (2*3.1415926f);
+            const float dG1_dn3 =  -exp_part*dev_erf1*((norm_use.x*d.x + norm_use.y*d.y)*norm_use.z/(con_o2.z));//-exp_part*dev_erf1*((norm_use.x*d.x + norm_use.y*d.y)/(sqrt(2.f)*norm_use.z*norm_use.z)); //((norm_use.x*usex + norm_use.y*usey)/(1.4142135f*norm_use.z*norm_use.z));//(-1.4142135f*(norm_use.x*d.x/W + norm_use.y*d.y/H)/(norm_use.z*norm_use.z)); //(exp_part)*(1.0f - tanh_result1*tanh_result1)*((norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(-1.4142135f*norm_use.z*norm_use.z))/(2.0f*3.1415926f);//exp_part*(1.0f-tanh_result1*tanh_result1)*(norm_use.x*d.x + norm_use.y*d.y)/(1.4142135f*norm_use.z) / (2*3.1415926f);
 
             const float dG2_dn1 =  -dG1_dn1;//exp_part*dev_erf2*(-1.4142135f*d.x/(W*norm_use.z));//(exp_part)*(1.0f - tanh_result2*tanh_result2)*((con_o1.x * d.x + con_o1.y * d.y)/(-1.4142135f*norm_use.z))/(2.0f*3.1415926f);//-exp_part*(1.0f-tanh_result2*tanh_result2)*d.x/(1.4142135f*norm_use.z) / (2*3.1415926f);
             const float dG2_dn2 =  -dG1_dn2;//exp_part*dev_erf2*(-1.4142135f*d.y/(H*norm_use.z)); //(exp_part)*(1.0f - tanh_result2*tanh_result2)*((con_o1.z * d.y)/(-1.4142135f*norm_use.z))/(2.0f*3.1415926f);//-exp_part*(1.0f-tanh_result2*tanh_result2)*d.y/(1.4142135f*norm_use.z) / (2*3.1415926f);
             const float dG2_dn3 =  -dG1_dn3;//exp_part*dev_erf2*(1.4142135f*(norm_use.x*d.x/W + norm_use.y*d.y/H)/(norm_use.z*norm_use.z));//(exp_part)*(1.0f - tanh_result2*tanh_result2)*((norm_use.x*(con_o1.x * d.x + con_o1.y * d.y) + norm_use.y*(con_o1.z * d.y))/(1.4142135f*norm_use.z*norm_use.z))/(2.0f*3.1415926f);//-exp_part*(1.0f-tanh_result2*tanh_result2)*(norm_use.x*d.x + norm_use.y*d.y)/(1.4142135f*norm_use.z) / (2*3.1415926f);
 
+            const float dG1_ds6 = 0.5f*exp_part*dev_erf1*((sigma6*con_o1.x+sigma7*con_o1.y)*1.99999982358225f*con_o2.z*con_o2.z*temp + con_o2.z*(con_o1.x*d.x + con_o1.y*d.y));
+            const float dG1_ds7 = 0.5f*exp_part*dev_erf1*((sigma6*con_o1.y+sigma7*con_o1.z)*1.99999982358225f*con_o2.z*con_o2.z*temp + con_o2.z*(con_o1.y*d.x + con_o1.z*d.y));
+            const float dG1_ds8 = exp_part*dev_erf1*(-0.5f*1.99999982358225f*con_o2.z*con_o2.z*temp);
+
+            const float dG2_ds6 = -dG1_ds6;
+            const float dG2_ds7 = -dG1_ds7;
+            const float dG2_ds8 = -dG1_ds8;
 
 			if (alpha < 1.0f / 255.0f)
 				continue;
@@ -632,15 +660,14 @@ renderCUDA(
 
 
 			// Update gradients w.r.t. 2D mean position of the Gaussian
-			float dl_mean2_part1 = dL_dalpha*0.5f*con_o1.w;
-			float dl_mean2_part2 = dL_dalpha*0.5f*con_o2.w;
-			atomicAdd(&dL_dmean2D[global_id].x, dl_mean2_part1*dG1_dx +dl_mean2_part2*dG2_dx);//dL_dalpha*(0.5f*con_o1.w*dG1_dx + 0.5f*con_o2.w*dG2_dx));//dL_dalpha* (0.5f*con_o1.w*dG1_dx + 0.5f*con_o2.w*dG2_dx));//dL_dalpha* 0.5*(alpha1*(-d.x*dev_xy_front1 + dev_xy_back_x1) + alpha2*(-d.x*dev_xy_front2 + dev_xy_back_x2)));//dL_dG * dG_ddelx * ddelx_dx);
-			atomicAdd(&dL_dmean2D[global_id].y, dl_mean2_part1*dG1_dy +dl_mean2_part2*dG2_dy);//dL_dalpha*(0.5f*con_o1.w*dG1_dy + 0.5f*con_o2.w*dG2_dy));//dL_dalpha* (0.5f*con_o1.w*dG1_dy + 0.5f*con_o2.w*dG2_dy));//dL_dalpha* 0.5*(alpha1*(-d.y*dev_xy_front1 + dev_xy_back_y1) + alpha2*(-d.x*dev_xy_front2 + dev_xy_back_y2)));//dL_dG * dG_ddely * ddely_dy);
+			atomicAdd(&dL_dmean2D[global_id].x, dL_dalpha*(0.5f*con_o1.w*dG1_dx + 0.5f*con_o2.w*dG2_dx));//dL_dalpha* (0.5f*con_o1.w*dG1_dx + 0.5f*con_o2.w*dG2_dx));//dL_dalpha* 0.5*(alpha1*(-d.x*dev_xy_front1 + dev_xy_back_x1) + alpha2*(-d.x*dev_xy_front2 + dev_xy_back_x2)));//dL_dG * dG_ddelx * ddelx_dx);
+			atomicAdd(&dL_dmean2D[global_id].y, dL_dalpha*(0.5f*con_o1.w*dG1_dy + 0.5f*con_o2.w*dG2_dy));//dL_dalpha* (0.5f*con_o1.w*dG1_dy + 0.5f*con_o2.w*dG2_dy));//dL_dalpha* 0.5*(alpha1*(-d.y*dev_xy_front1 + dev_xy_back_y1) + alpha2*(-d.x*dev_xy_front2 + dev_xy_back_y2)));//dL_dG * dG_ddely * ddely_dy);
 
 			// Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
-			atomicAdd(&dL_dconic2D[global_id].x, dl_mean2_part1*dG1_dcx+dl_mean2_part2*dG2_dcx);//dL_dalpha*(0.5f*con_o1.w*dG1_dcx + 0.5f*con_o2.w*dG2_dcx));//-0.5f * gdx * d.x * dL_dG);
-			atomicAdd(&dL_dconic2D[global_id].y, dl_mean2_part1*dG1_dcy+dl_mean2_part2*dG2_dcy);//dL_dalpha*(0.5f*con_o1.w*dG1_dcy + 0.5f*con_o2.w*dG2_dcy));//-0.5f * gdx * d.y * dL_dG);
-			atomicAdd(&dL_dconic2D[global_id].w, dl_mean2_part1*dG1_dcz+dl_mean2_part2*dG2_dcz);//dL_dalpha*(0.5f*con_o1.w*dG1_dcz + 0.5f*con_o2.w*dG2_dcz));//-0.5f * gdy * d.y * dL_dG);
+
+			atomicAdd(&dL_dconic2D[global_id].x, dL_dalpha*(0.5f*con_o1.w*dG1_dcx + 0.5f*con_o2.w*dG2_dcx));//-0.5f * gdx * d.x * dL_dG);
+			atomicAdd(&dL_dconic2D[global_id].y, dL_dalpha*(0.5f*con_o1.w*dG1_dcy + 0.5f*con_o2.w*dG2_dcy));//-0.5f * gdx * d.y * dL_dG);
+			atomicAdd(&dL_dconic2D[global_id].w, dL_dalpha*(0.5f*con_o1.w*dG1_dcz + 0.5f*con_o2.w*dG2_dcz));//-0.5f * gdy * d.y * dL_dG);
 
 			// Update gradients w.r.t. opacity of the Gaussian
 			atomicAdd(&(dL_dopacity1[global_id]), 0.5f * G1 * dL_dalpha);
@@ -648,9 +675,13 @@ renderCUDA(
 
 			//also need to calculate grad for normal
 
-            atomicAdd(&dL_dnormal[global_id].x, dl_mean2_part1*dG1_dn1 + dl_mean2_part2*dG2_dn1);//0.5f* dL_dalpha*(con_o1.w*dG1_dn1 + con_o2.w*dG2_dn1));//(projmatrix[0]*viewmatrix[0]+projmatrix[4]*viewmatrix[1]+projmatrix[8]*viewmatrix[2])*dL_dn1p + (projmatrix[0]*viewmatrix[4]+projmatrix[4]*viewmatrix[5]+projmatrix[8]*viewmatrix[6])*dL_dn2p + (projmatrix[0]*viewmatrix[8]+projmatrix[4]*viewmatrix[9]+projmatrix[8]*viewmatrix[10])*dL_dn3p);//0.5f*(alpha1*dev_part_nx1 + alpha2*dev_part_nx2)* dL_dalpha); //&dL_normal[global_id].x,
-            atomicAdd(&dL_dnormal[global_id].y, dl_mean2_part1*dG1_dn2 + dl_mean2_part2*dG2_dn2);//0.5f* dL_dalpha*(con_o1.w*dG1_dn2 + con_o2.w*dG2_dn2));//(projmatrix[1]*viewmatrix[0]+projmatrix[5]*viewmatrix[1]+projmatrix[9]*viewmatrix[2])*dL_dn1p + (projmatrix[1]*viewmatrix[4]+projmatrix[5]*viewmatrix[5]+projmatrix[9]*viewmatrix[6])*dL_dn2p + (projmatrix[1]*viewmatrix[8]+projmatrix[5]*viewmatrix[9]+projmatrix[9]*viewmatrix[10])*dL_dn3p);//0.5f*(alpha1*dev_part_ny1 + alpha2*dev_part_ny2)* dL_dalpha);
-            atomicAdd(&dL_dnormal[global_id].z, dl_mean2_part1*dG1_dn3 + dl_mean2_part2*dG2_dn3);//0.5f* dL_dalpha*(con_o1.w*dG1_dn3 + con_o2.w*dG2_dn3));//(projmatrix[2]*viewmatrix[0]+projmatrix[6]*viewmatrix[1]+projmatrix[10]*viewmatrix[2])*dL_dn1p + (projmatrix[2]*viewmatrix[4]+projmatrix[6]*viewmatrix[5]+projmatrix[10]*viewmatrix[6])*dL_dn2p + (projmatrix[2]*viewmatrix[8]+projmatrix[6]*viewmatrix[9]+projmatrix[10]*viewmatrix[10])*dL_dn3p);
+            atomicAdd(&dL_dnormal[global_id].x, 0.5f* dL_dalpha*(con_o1.w*dG1_dn1 + con_o2.w*dG2_dn1));//(projmatrix[0]*viewmatrix[0]+projmatrix[4]*viewmatrix[1]+projmatrix[8]*viewmatrix[2])*dL_dn1p + (projmatrix[0]*viewmatrix[4]+projmatrix[4]*viewmatrix[5]+projmatrix[8]*viewmatrix[6])*dL_dn2p + (projmatrix[0]*viewmatrix[8]+projmatrix[4]*viewmatrix[9]+projmatrix[8]*viewmatrix[10])*dL_dn3p);//0.5f*(alpha1*dev_part_nx1 + alpha2*dev_part_nx2)* dL_dalpha); //&dL_normal[global_id].x,
+            atomicAdd(&dL_dnormal[global_id].y, 0.5f* dL_dalpha*(con_o1.w*dG1_dn2 + con_o2.w*dG2_dn2));//(projmatrix[1]*viewmatrix[0]+projmatrix[5]*viewmatrix[1]+projmatrix[9]*viewmatrix[2])*dL_dn1p + (projmatrix[1]*viewmatrix[4]+projmatrix[5]*viewmatrix[5]+projmatrix[9]*viewmatrix[6])*dL_dn2p + (projmatrix[1]*viewmatrix[8]+projmatrix[5]*viewmatrix[9]+projmatrix[9]*viewmatrix[10])*dL_dn3p);//0.5f*(alpha1*dev_part_ny1 + alpha2*dev_part_ny2)* dL_dalpha);
+            atomicAdd(&dL_dnormal[global_id].z, 0.5f* dL_dalpha*(con_o1.w*dG1_dn3 + con_o2.w*dG2_dn3));//(projmatrix[2]*viewmatrix[0]+projmatrix[6]*viewmatrix[1]+projmatrix[10]*viewmatrix[2])*dL_dn1p + (projmatrix[2]*viewmatrix[4]+projmatrix[6]*viewmatrix[5]+projmatrix[10]*viewmatrix[6])*dL_dn2p + (projmatrix[2]*viewmatrix[8]+projmatrix[6]*viewmatrix[9]+projmatrix[10]*viewmatrix[10])*dL_dn3p);
+
+            atomicAdd(&dL_conic_another[global_id].x, 0.5f* dL_dalpha*(con_o1.w*dG1_ds6 + con_o2.w*dG2_ds6)); //sigma6
+            atomicAdd(&dL_conic_another[global_id].y, 0.5f* dL_dalpha*(con_o1.w*dG1_ds7 + con_o2.w*dG2_ds7)); //sigma7
+            atomicAdd(&dL_conic_another[global_id].z, 0.5f* dL_dalpha*(con_o1.w*dG1_ds8 + con_o2.w*dG2_ds8)); //sigma8
 
 		}
 	}
@@ -659,7 +690,7 @@ renderCUDA(
 void BACKWARD::preprocess(
 	int P, int D, int M,
 	const float3* means3D,
-
+	const float3* normal,
 	const int* radii,
 	const float* shs,
 	const bool* clamped,
@@ -680,7 +711,8 @@ void BACKWARD::preprocess(
 	float* dL_dcov3D,
 	float* dL_dsh,
 	glm::vec3* dL_dscale,
-	glm::vec4* dL_drot) //const float3* normal,
+	glm::vec4* dL_drot,
+	float3* dL_conic_another)
 {
 	// Propagate gradients for the path of 2D conic matrix computation. 
 	// Somewhat long, thus it is its own kernel rather than being part of 
@@ -699,7 +731,8 @@ void BACKWARD::preprocess(
 		dL_dconic,
 		(float3*)dL_dmean3D,
 		(float3*)dL_dnormal,
-		dL_dcov3D);
+		dL_dcov3D,
+		(float3*)dL_conic_another);
 
 	// Propagate gradients for remaining steps: finish 3D mean gradients,
 	// propagate color gradients to SH (if desireD), propagate 3D covariance
@@ -733,7 +766,9 @@ void BACKWARD::render(
 	const float2* means2D,
 	const float4* conic_opacity1,
 	const float4* conic_opacity2,
-
+	const float4* conic_opacity4,
+	const float3* conic_opacity5,
+	const float3* normal,
 	const float* viewmatrix,
 	const float* projmatrix,
 	const float* colors,
@@ -745,7 +780,8 @@ void BACKWARD::render(
 	float* dL_dopacity1,
 	float* dL_dopacity2,
 	float3* dL_dnormal,
-	float* dL_dcolors) //const float3* normal,
+	float* dL_dcolors,
+	float3* dL_conic_another)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
 		ranges,
@@ -755,7 +791,9 @@ void BACKWARD::render(
 		means2D,
 		conic_opacity1,
 		conic_opacity2,
-
+		conic_opacity4,
+		conic_opacity5,
+		normal,
 		viewmatrix,
 		projmatrix,
 		colors,
@@ -767,5 +805,6 @@ void BACKWARD::render(
 		dL_dopacity1,
 		dL_dopacity2,
 		dL_dnormal,
-		dL_dcolors); //normal,
+		dL_dcolors,
+		dL_conic_another);
 }

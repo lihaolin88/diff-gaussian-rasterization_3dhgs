@@ -18,6 +18,10 @@
 #define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
 #define NUM_WARPS (BLOCK_SIZE/32)
 
+struct float6 {
+    float x, y, z, w, u, v;
+};
+
 // Spherical harmonics coefficients
 __device__ const float SH_C0 = 0.28209479177387814f;
 __device__ const float SH_C1 = 0.4886025119029199f;
@@ -38,51 +42,84 @@ __device__ const float SH_C3[] = {
 	-0.5900435899266435f
 };
 
-__device__ const float pp = 0.3275911f;
-__device__ const float aa1 = 0.254829592f;
-__device__ const float aa2 = -0.284496736f;
-__device__ const float aa3 = 1.421413741f;
-__device__ const float aa4 = -1.453152027f;
-__device__ const float aa5 = 1.061405429f;
-
-
-__forceinline__ __device__ float fast_erff(float x) {
-	if (x > 2.5f)
-		return 1.f;
-	if (x < -2.5f)
-		return -1.f;
-	float x2 = x * x;
-	float x3 = x * x2;
-	float x4 = x3 * x;
-	float x5 = x4 * x;
-	return 0.07522527781f * (49140.f * x + 35770.f * x3 + 739.f * x5) / (775.f * x4 + 3830.f * x2 + 3276.f);
-
-
-    // constant value, can change
-    //float sign = x < 0 ? -1.0f : 1.0f;
-    //x = fabsf(x);
-
-    // similar equation
-    //float t = 1.0f / (1.0f + pp * x);
-    //float y = 1.0f - (((((aa5 * t + aa4) * t) + aa3) * t + aa2) * t + aa1) * t * expf(-x * x);
-
-    //return sign * y;
-}
-
 __forceinline__ __device__ float ndc2Pix(float v, int S)
 {
 	return ((v + 1.0) * S - 1.0) * 0.5;
 }
 
-__forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& rect_min, uint2& rect_max, dim3 grid)
+__forceinline__ __device__ void getRect_another(const float2 p, int width, int height, int width_small, int height_small, int width_another, int height_another, int width_small_another, int height_small_another, int type, uint2& rect_min, uint2& rect_max, uint2& rect_min_another, uint2& rect_max_another, dim3 grid)
+{
+    uint2 rect_min_large = {
+		min(grid.x, max((int)0, (int)((p.x - width) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - height) / BLOCK_Y)))
+	};
+	uint2 rect_max_large = {
+		min(grid.x, max((int)0, (int)((p.x + width + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + height + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+	uint2 rect_min_small = {
+		min(grid.x, max((int)0, (int)((p.x - width_small) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - height_small) / BLOCK_Y)))
+	};
+	uint2 rect_max_small = {
+		min(grid.x, max((int)0, (int)((p.x + width_small + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + height_small + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+
+	////
+//	rect_min_small.x = (rect_max_large.x - rect_min_large.x)<3?rect_min_large.x: rect_min_small.x;
+//	rect_min_small.y = (rect_max_large.y - rect_min_large.y)<3?rect_min_large.y: rect_min_small.y;
+//	rect_max_small.x = (rect_max_large.x - rect_min_large.x)<3?rect_max_large.x: rect_max_small.x;
+//	rect_max_small.y = (rect_max_large.x - rect_min_large.x)<3?rect_max_large.y: rect_max_small.y;
+	////
+
+	/////////////////////////
+	uint2 rect_min_large_another = {
+		min(grid.x, max((int)0, (int)((p.x - width_another) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - height_another) / BLOCK_Y)))
+	};
+	uint2 rect_max_large_another = {
+		min(grid.x, max((int)0, (int)((p.x + width_another + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + height_another + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+	uint2 rect_min_small_another = {
+		min(grid.x, max((int)0, (int)((p.x - width_small_another) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - height_small_another) / BLOCK_Y)))
+	};
+	uint2 rect_max_small_another = {
+		min(grid.x, max((int)0, (int)((p.x + width_small_another + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + height_small_another + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+	/////////////////////////
+    //return result based on type
+    uint32_t type0 =  static_cast<int>(type == 0);// ? 1 : 0; //determine if type is 0
+    uint32_t type1 =  static_cast<int>(type == 1);// ? 1 : 0; //determine if type is 1
+    uint32_t type2 =  static_cast<int>(type == 2);// ? 1 : 0; //determine if type is 2
+    uint32_t type3 =  static_cast<int>(type == 3);// ? 1 : 0; //determine if type is 3
+    uint32_t type4 =  static_cast<int>(type == 4);// ? 1 : 0; //determine if type is 4
+
+    rect_min = {(type0 + type1 + type3)*rect_min_large.x + (type2 + type4)*rect_min_small.x, (type0 + type1 + type2)*rect_min_large.y + (type3 + type4)*rect_min_small.y};
+//    rect_max = {(type0 + type2 + type4)*rect_max_large.x + (type1 + type3)*rect_max_small.x, (type0 + type1 + type2)*rect_max_large.y + (type3 + type4)*rect_max_small.y};
+    rect_max = {(type0 + type2 + type4)*rect_max_large.x + (type1 + type3)*rect_max_small.x, (type0 + type3 + type4)*rect_max_large.y + (type1 + type2)*rect_max_small.y};
+
+    ///////////////////////
+    rect_min_another = {(type0 + type4 + type2)*rect_min_large_another.x + (type3 + type1)*rect_min_small_another.x, (type0 + type4 + type3)*rect_min_large_another.y + (type2 + type1)*rect_min_small_another.y};
+//    rect_max_another = {(type0 + type3 + type1)*rect_max_large_another.x + (type4 + type2)*rect_max_small_another.x, (type0 + type4 + type3)*rect_max_large_another.y + (type2 + type1)*rect_max_small_another.y};
+    rect_max_another = {(type0 + type3 + type1)*rect_max_large_another.x + (type4 + type2)*rect_max_small_another.x, (type0 + type2 + type1)*rect_max_large_another.y + (type4 + type3)*rect_max_small_another.y};
+    ///////////////////////
+//    printf("rec top %d, %d, bottom %d, %d. Another top %d, %d, bottom %d, %d\n", rect_min.x,rect_min.y,rect_max.x,rect_max.y, rect_min_another.x,rect_min_another.y,rect_max_another.x,rect_max_another.y);
+//    printf("rec top %d, %d, bottom %d, %d. Another top %d, %d, bottom %d, %d\n", rect_min_large.x,rect_min_large.y,rect_max_large.x,rect_max_large.y, rect_min_small.x,rect_min_small.y,rect_max_small.x,rect_max_small.y);
+}
+
+__forceinline__ __device__ void getRect(const float2 p, int width, int height, uint2& rect_min, uint2& rect_max, dim3 grid)
 {
 	rect_min = {
-		min(grid.x, max((int)0, (int)((p.x - max_radius) / BLOCK_X))),
-		min(grid.y, max((int)0, (int)((p.y - max_radius) / BLOCK_Y)))
+		min(grid.x, max((int)0, (int)((p.x - width) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - height) / BLOCK_Y)))
 	};
 	rect_max = {
-		min(grid.x, max((int)0, (int)((p.x + max_radius + BLOCK_X - 1) / BLOCK_X))),
-		min(grid.y, max((int)0, (int)((p.y + max_radius + BLOCK_Y - 1) / BLOCK_Y)))
+		min(grid.x, max((int)0, (int)((p.x + width + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + height + BLOCK_Y - 1) / BLOCK_Y)))
 	};
 }
 

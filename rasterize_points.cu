@@ -43,6 +43,7 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& rotations,
 	const float scale_modifier,
 	const torch::Tensor& cov3D_precomp,
+	const torch::Tensor& cov3D_precomp_small,
 	const torch::Tensor& viewmatrix,
 	const torch::Tensor& projmatrix,
 	const float tan_fovx, 
@@ -102,8 +103,9 @@ RasterizeGaussiansCUDA(
 		scales.contiguous().data_ptr<float>(),
 		scale_modifier,
 		rotations.contiguous().data_ptr<float>(),
-		cov3D_precomp.contiguous().data<float>(), 
-		viewmatrix.contiguous().data<float>(), 
+		cov3D_precomp.contiguous().data<float>(),
+		cov3D_precomp_small.contiguous().data<float>(),
+		viewmatrix.contiguous().data<float>(),
 		projmatrix.contiguous().data<float>(),
 		campos.contiguous().data<float>(),
 		tan_fovx,
@@ -159,9 +161,11 @@ RasterizeGaussiansBackwardCUDA(
   torch::Tensor dL_dopacity1 = torch::zeros({P, 1}, means3D.options());
   torch::Tensor dL_dopacity2 = torch::zeros({P, 1}, means3D.options());
   torch::Tensor dL_dcov3D = torch::zeros({P, 6}, means3D.options());
+  //torch::Tensor dL_dcov3D_small = torch::zeros({P, 6}, means3D.options());
   torch::Tensor dL_dsh = torch::zeros({P, M, 3}, means3D.options());
   torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_drotations = torch::zeros({P, 4}, means3D.options());
+  torch::Tensor dL_conic_another = torch::zeros({P, 3}, means3D.options()); //save sigma6, sigma7 and sigma8
   
   if(P != 0)
   {  
@@ -197,6 +201,7 @@ RasterizeGaussiansBackwardCUDA(
 	  dL_dsh.contiguous().data<float>(),
 	  dL_dscales.contiguous().data<float>(),
 	  dL_drotations.contiguous().data<float>(),
+	  dL_conic_another.contiguous().data<float>(),
 	  debug);
   }
 
